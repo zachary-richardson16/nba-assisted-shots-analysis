@@ -1,0 +1,83 @@
+---
+title: "test"
+author: "Zachary Richardson"
+date: "`r Sys.Date()`"
+output: html_document
+---
+
+## Description
+The current goal of this project is to identify areas of the court where assists are most impactful. This can be useful for identifying areas on the court to design plays resulting in catch-and-shoot opportunities. This can also be used to identify which players excel more in specific areas of the court off of assisted shots, as well as who is not impact (or potentially negatively impacted) by assisted shot opportunities.
+
+To complete this analysis, we need several points of data:
+1. Shot location (x, y)
+2. Shot outcome (Make/Miss)
+3. Shot assisted (Y/N)
+
+There exists a data set in GitHub uploaded by DomSamangy which contains shot data for every shot taken from 2003-2024 seasons. It does not contain assist information, so we need to scrape play-by-play data from Basketball Reference, then merge the data sets using time stamps to determine whether a shot was assisted or not. 
+
+
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+
+```{r}
+## Load packages
+library(tidyverse)
+library(rvest)
+library(stringr)
+
+## Ensure dplyr verbs work correctly
+mutate <- dplyr::mutate
+select <- dplyr::select
+filter <- dplyr::filter
+arrange <- dplyr::arrange
+summarize <- dplyr::summarize
+```
+
+
+```{r}
+## Import shots data (credit to DomSamangy on GitHub for the data set)
+setwd("C:/Users/zacri/OneDrive - University of North Carolina at Chapel Hill/Documents/Coding/Projects/NBA Shot Charts")
+shots = read.csv("NBA_2025_Shots.csv")
+```
+
+
+```{r}
+## Test of rvest to web scrape a box score from a specific game on Basketball Reference
+raw_pbp = read_html("https://www.basketball-reference.com/boxscores/pbp/202505140BOS.html")
+
+pbp_clean = raw_pbp %>%
+  html_table() %>%
+  pluck(1) %>%
+  
+  ## Change column names
+  set_names(c("time", "away_detail", "away_result", "score", "home_result", "home_detail")) %>%
+  
+  ## Clean data by removing data-less rows
+  filter(score != "Score",
+         !str_detect(score, "End"), # Rows indicating end of quarter 
+         !if_any(c(away_detail, home_detail), ~ str_detect(.x, regex("shot clock")))) %>% # Shot clock violations
+  
+  ## Keep only rows containing shot information (removes free throws as well)
+  filter(if_any(c(away_detail, home_detail), ~ str_detect(.x, regex("shot | layup | dunk")))) %>%
+  
+  ## Convert _result columns to numerical
+  mutate(across(c(away_result, home_result), ~ as.numeric(gsub("\\+", "", .))),
+         across(c(away_result, home_result), ~ ifelse(is.na(.), 0, .))) %>%
+  
+  ## Split time column into minutes and seconds columns
+  separate_wider_delim(time, ":", names = c("min_left", "sec_left")) %>%
+  separate_wider_delim(score, "-", names = c("away_score", "home_score")) %>%
+  mutate(across(c(min_left, sec_left, away_score, home_score), ~ as.numeric(.)))
+
+## TODO: Find a way to scrape every game from every day, month, year since ?
+```
+
+
+
+
+
+
+
