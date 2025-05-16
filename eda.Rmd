@@ -22,7 +22,7 @@ knitr::opts_chunk$set(echo = TRUE)
 ```
 
 
-```{r}
+```{r message=FALSE, warning=FALSE}
 ## Load packages
 library(tidyverse)
 library(rvest)
@@ -39,15 +39,29 @@ summarize <- dplyr::summarize
 
 ```{r}
 ## Import shots data (credit to DomSamangy on GitHub for the data set)
-setwd("C:/Users/zacri/OneDrive - University of North Carolina at Chapel Hill/Documents/Coding/Projects/NBA Shot Charts")
 shots = read.csv("NBA_2025_Shots.csv")
 ```
 
+## Web Scraping
 
 ```{r}
 ## Test of rvest to web scrape a box score from a specific game on Basketball Reference
-raw_pbp = read_html("https://www.basketball-reference.com/boxscores/pbp/202505140BOS.html")
+raw_pbp = read_html("https://www.basketball-reference.com/boxscores/pbp/202410220BOS.html")
 
+## Use selector gadget tool in chrome to identify the html elements to scrape
+
+## Scrap game data and time info
+game_date_time = raw_pbp %>%
+  html_elements(".scorebox_meta div:nth-child(1)") %>%
+  html_text() # keep only text
+
+## Scrape away and home team names
+teams = raw_pbp %>%
+  html_elements(".scorebox strong a") %>%
+  html_text() # keep only text
+
+
+## Scrape and clean/tidy play-by-play data
 pbp_clean = raw_pbp %>%
   html_table() %>%
   pluck(1) %>%
@@ -55,7 +69,22 @@ pbp_clean = raw_pbp %>%
   ## Change column names
   set_names(c("time", "away_detail", "away_result", "score", "home_result", "home_detail")) %>%
   
-  ## Clean data by removing data-less rows
+  ## Add in period column (allow for up to 4 OT since this has happened semi-recently)
+  mutate(period = case_when(
+    score == "End of 1st quarter" ~ 1,
+    time == "2nd Q" ~ 2,
+    time == "3rd Q" ~ 3,
+    time == "4th Q" ~ 4,
+    time == "1st OT" ~ 5,
+    time == "2nd OT" ~ 6,
+    time == "3rd OT" ~ 7,
+    time == "4th OT" ~ 8
+  )) %>%
+  
+  ## Fill period information to each row
+  fill(period, .direction = "downup") %>%
+  
+  ## Remove data-less rows
   filter(score != "Score",
          !str_detect(score, "End"), # Rows indicating end of quarter 
          !if_any(c(away_detail, home_detail), ~ str_detect(.x, regex("shot clock")))) %>% # Shot clock violations
@@ -65,15 +94,56 @@ pbp_clean = raw_pbp %>%
   
   ## Convert _result columns to numerical
   mutate(across(c(away_result, home_result), ~ as.numeric(gsub("\\+", "", .))),
-         across(c(away_result, home_result), ~ ifelse(is.na(.), 0, .))) %>%
+         across(c(away_result, home_result), ~ ifelse(is.na(.), 0, .)),
+         away_team = teams[1],
+         home_team = teams[2],
+         game_info = game_date_time) %>%
   
   ## Split time column into minutes and seconds columns
   separate_wider_delim(time, ":", names = c("min_left", "sec_left")) %>%
   separate_wider_delim(score, "-", names = c("away_score", "home_score")) %>%
-  mutate(across(c(min_left, sec_left, away_score, home_score), ~ as.numeric(.)))
+  mutate(across(c(min_left, sec_left, away_score, home_score), ~ as.numeric(.))) %>%
+  
+  ## Split game_info into date and time columns
+  ## Use too_many = "merge" to keep date together and only split at the first comma
+  separate_wider_delim(game_info, ",", names = c("start_time", "game_date"), too_many = "merge") %>%
+  mutate(game_date = gsub("\\,", "", game_date), # Remove comma from the date
+         game_date = gsub("^ ", "", game_date), # Remove space from the beginning of the date
+         game_date = as.Date(game_date, format = "%B %d %Y")) # Convert into a date in YYYY-MM-DD Format
 
+```
+
+
+```{r}
 ## TODO: Find a way to scrape every game from every day, month, year since ?
 ```
+
+
+## Merge Data Sets Together
+```{r}
+## Example of how to merge once we have all of the games scraped into one data set
+## This works, but would make sense to change columns of the shots data set prior to merging 
+
+test = pbp_clean %>%
+  mutate(away_team_abbr = "NYK",
+         home_team_abbr = "BOS")
+
+shots_test = shots %>%
+  filter(GAME_DATE == "10-22-2024") %>%
+  mutate(GAME_DATE = as.Date(GAME_DATE, format = "%m-%d-%Y"))
+
+
+nba_shots_pbp = shots_test %>%
+  merge(test,
+        by.x = c("GAME_DATE", "AWAY_TEAM", "HOME_TEAM", "QUARTER", "MINS_LEFT", "SECS_LEFT"),
+        by.y = c("game_date", "away_team_abbr", "home_team_abbr", "period", "min_left", "sec_left"))
+
+
+test.FINAL = nba_shots_pbp %>%
+  arrange(QUARTER, -MINS_LEFT, -SECS_LEFT) %>%
+  select(QUARTER, MINS_LEFT, SECS_LEFT, away_score, home_score, everything())
+```
+
 
 
 
