@@ -27,6 +27,8 @@ knitr::opts_chunk$set(echo = TRUE)
 library(tidyverse)
 library(rvest)
 library(stringr)
+library(magrittr)
+library(lubridate)
 
 ## Ensure dplyr verbs work correctly
 mutate <- dplyr::mutate
@@ -46,76 +48,135 @@ shots = read.csv("NBA_2025_Shots.csv")
 
 ```{r}
 ## Test of rvest to web scrape a box score from a specific game on Basketball Reference
-raw_pbp = read_html("https://www.basketball-reference.com/boxscores/pbp/202410220BOS.html")
-
-## Use selector gadget tool in chrome to identify the html elements to scrape
-
-## Scrap game data and time info
-game_date_time = raw_pbp %>%
-  html_elements(".scorebox_meta div:nth-child(1)") %>%
-  html_text() # keep only text
-
-## Scrape away and home team names
-teams = raw_pbp %>%
-  html_elements(".scorebox strong a") %>%
-  html_text() # keep only text
+#raw_pbp = read_html("https://www.basketball-reference.com/boxscores/pbp/202410220BOS.html")
 
 
-## Scrape and clean/tidy play-by-play data
-pbp_clean = raw_pbp %>%
-  html_table() %>%
-  pluck(1) %>%
+
+## Define a function that takes a raw_html (play-by-play table) and returns a tidy/clean data frame
+tidy_pbp <- function(raw_pbp){
   
-  ## Change column names
-  set_names(c("time", "away_detail", "away_result", "score", "home_result", "home_detail")) %>%
+  ## Use selector gadget tool in chrome to identify the html elements to scrape
   
-  ## Add in period column (allow for up to 4 OT since this has happened semi-recently)
-  mutate(period = case_when(
-    score == "End of 1st quarter" ~ 1,
-    time == "2nd Q" ~ 2,
-    time == "3rd Q" ~ 3,
-    time == "4th Q" ~ 4,
-    time == "1st OT" ~ 5,
-    time == "2nd OT" ~ 6,
-    time == "3rd OT" ~ 7,
-    time == "4th OT" ~ 8
-  )) %>%
+  ## Scrap game data and time info
+  game_date_time = raw_pbp %>%
+    html_elements(".scorebox_meta div:nth-child(1)") %>%
+    html_text() # keep only text
   
-  ## Fill period information to each row
-  fill(period, .direction = "downup") %>%
+  ## Scrape away and home team names
+  teams = raw_pbp %>%
+    html_elements(".scorebox strong a") %>%
+    html_text() # keep only text
   
-  ## Remove data-less rows
-  filter(score != "Score",
-         !str_detect(score, "End"), # Rows indicating end of quarter 
-         !if_any(c(away_detail, home_detail), ~ str_detect(.x, regex("shot clock")))) %>% # Shot clock violations
   
-  ## Keep only rows containing shot information (removes free throws as well)
-  filter(if_any(c(away_detail, home_detail), ~ str_detect(.x, regex("shot | layup | dunk")))) %>%
+  ## Scrape and clean/tidy play-by-play data
+  pbp_clean = raw_pbp %>%
+    html_table() %>%
+    pluck(1) %>%
+    
+    ## Change column names
+    set_names(c("time", "away_detail", "away_result", "score", "home_result", "home_detail")) %>%
+    
+    ## Add in period column (allow for up to 4 OT since this has happened semi-recently)
+    mutate(period = case_when(
+      score == "End of 1st quarter" ~ 1,
+      time == "2nd Q" ~ 2,
+      time == "3rd Q" ~ 3,
+      time == "4th Q" ~ 4,
+      time == "1st OT" ~ 5,
+      time == "2nd OT" ~ 6,
+      time == "3rd OT" ~ 7,
+      time == "4th OT" ~ 8
+    )) %>%
+    
+    ## Fill period information to each row
+    fill(period, .direction = "downup") %>%
+    
+    ## Remove data-less rows
+    filter(score != "Score",
+           !str_detect(score, "End"), # Rows indicating end of quarter 
+           !if_any(c(away_detail, home_detail), ~ str_detect(.x, regex("shot clock")))) %>% # Shot clock violations
+    
+    ## Keep only rows containing shot information (removes free throws as well)
+    filter(if_any(c(away_detail, home_detail), ~ str_detect(.x, regex("shot | layup | dunk")))) %>%
+    
+    ## Convert _result columns to numerical
+    mutate(across(c(away_result, home_result), ~ as.numeric(gsub("\\+", "", .))),
+           across(c(away_result, home_result), ~ ifelse(is.na(.), 0, .)),
+           away_team = teams[1],
+           home_team = teams[2],
+           game_info = game_date_time) %>%
+    
+    ## Split time column into minutes and seconds columns
+    separate_wider_delim(time, ":", names = c("min_left", "sec_left")) %>%
+    separate_wider_delim(score, "-", names = c("away_score", "home_score")) %>%
+    mutate(across(c(min_left, sec_left, away_score, home_score), ~ as.numeric(.))) %>%
+    
+    ## Split game_info into date and time columns
+    ## Use too_many = "merge" to keep date together and only split at the first comma
+    separate_wider_delim(game_info, ",", names = c("start_time", "game_date"), too_many = "merge") %>%
+    mutate(game_date = gsub("\\,", "", game_date), # Remove comma from the date
+           game_date = gsub("^ ", "", game_date), # Remove space from the beginning of the date
+           game_date = as.Date(game_date, format = "%B %d %Y")) # Convert into a date in YYYY-MM-DD Format
+
+  return(pbp_clean)
   
-  ## Convert _result columns to numerical
-  mutate(across(c(away_result, home_result), ~ as.numeric(gsub("\\+", "", .))),
-         across(c(away_result, home_result), ~ ifelse(is.na(.), 0, .)),
-         away_team = teams[1],
-         home_team = teams[2],
-         game_info = game_date_time) %>%
-  
-  ## Split time column into minutes and seconds columns
-  separate_wider_delim(time, ":", names = c("min_left", "sec_left")) %>%
-  separate_wider_delim(score, "-", names = c("away_score", "home_score")) %>%
-  mutate(across(c(min_left, sec_left, away_score, home_score), ~ as.numeric(.))) %>%
-  
-  ## Split game_info into date and time columns
-  ## Use too_many = "merge" to keep date together and only split at the first comma
-  separate_wider_delim(game_info, ",", names = c("start_time", "game_date"), too_many = "merge") %>%
-  mutate(game_date = gsub("\\,", "", game_date), # Remove comma from the date
-         game_date = gsub("^ ", "", game_date), # Remove space from the beginning of the date
-         game_date = as.Date(game_date, format = "%B %d %Y")) # Convert into a date in YYYY-MM-DD Format
+}
 
 ```
 
 
 ```{r}
 ## TODO: Find a way to scrape every game from every day, month, year since ?
+
+
+## Create a function that loops through daily boxscores given a desired range of dates
+
+scrape_pbp <- function(start_date, end_date){
+  
+  pbp_stats_list = list()
+  
+  ## Loop through each date in the given date range
+  for(date in start_date:end_date){
+    
+    print(paste0("Today's date is ", as.Date(date)))
+    
+    ## Pull day, month, and year values
+    day_str = as.Date(date) %>% day()
+    month_str = as.Date(date) %>% month()
+    year_str = as.Date(date) %>% year()
+    
+    ## Scrape the links to each box score for the given day
+    daily_box_score_list = read_html(paste0("https://www.basketball-reference.com/boxscores/?month=", month_str, "&day=", day_str, "&year=", year_str)) %>%
+      html_elements(".gamelink") %>%
+      html_elements("a") %>%
+      html_attr("href") %>%
+      gsub("/boxscores/", "", .) # Remove "boxscores" from string due to "pbp" being between it and game id
+    
+    ## Loop through each game within the daily schedule and scrape play-by-play table
+    ## TODO: START HERE: If there are no games on that day, skip to the next date in the for loop
+    for(i in 1:length(daily_box_score_list)){
+      
+      raw_pbp = read_html(paste0("https://www.basketball-reference.com/boxscores/pbp/", daily_box_score_list[i]))
+      
+      pbp_stats_list[[length(pbp_stats_list) + 1]] = tidy_pbp(raw_pbp)
+      
+    }
+    
+    
+  }
+  
+  pbp_df = bind_rows(pbp_stats_list)
+  
+  return(pbp_df)
+
+}
+  
+start_date = as.Date("2025-05-14")
+end_date = as.Date("2025-05-14")
+
+test = scrape_pbp(start_date, end_date)
+
+
 ```
 
 
